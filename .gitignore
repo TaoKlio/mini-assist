@@ -7,6 +7,8 @@ build/
 
 # 打包的 jar（发布走 GitHub Release，不提交进仓库）
 *.jar
+# 例外：Gradle wrapper 自身需要入库
+!gradle/wrapper/gradle-wrapper.jar
 
 # IDE
 .idea/

@@ -1,0 +1,6 @@
+# 换行符规范（构建脚本必须固定，避免跨平台损坏）
+gradlew         text eol=lf
+gradlew.bat     text eol=crlf
+*.sh            text eol=lf
+*.bat           text eol=crlf
+gradle-wrapper.jar binary
