@@ -1,4 +1,4 @@
-package memacc;
+package miniassist.memory;
 
 import mindustry.world.blocks.logic.MemoryBlock;
 

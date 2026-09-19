@@ -1,4 +1,4 @@
-package memacc;
+package miniassist.memory;
 
 import arc.*;
 import arc.graphics.*;
@@ -8,13 +8,23 @@ import arc.math.geom.*;
 import mindustry.game.EventType.*;
 import mindustry.gen.Icon;
 import mindustry.graphics.*;
-import mindustry.mod.*;
+import mindustry.ui.dialogs.SettingsMenuDialog.SettingsTable;
 import mindustry.world.*;
 import mindustry.world.blocks.logic.MemoryBlock;
+import miniassist.SectionSetting;
 
 import static mindustry.Vars.*;
 
-public class MemoryAccessMod extends Mod{
+/**
+ * 内存块读写助手 —— mini辅助 的「内存块读写」feature。
+ *
+ * <p>悬停内存块时在方块上方画两个可点击图标：左为读（整块复制到剪贴板）、右为写（从剪贴板写回数字槽）。
+ * 仅单机可用（{@code net.active()} 时整体停用）。
+ *
+ * <p>本类不再是 mod 入口：入口是 {@code miniassist.MiniAssistMod}，它注册设置分类并调用
+ * {@link #init()} 与 {@link #addSettings(SettingsTable)}。
+ */
+public class MemoryTool{
     // 图标边长与两图标中心间距（世界单位，1 格 = 8）
     private static final float SIZE = 8f, GAP = 12f;
 
@@ -25,13 +35,15 @@ public class MemoryAccessMod extends Mod{
     // 虚拟选中的内存块：鼠标移向图标时保持选中，避免 UI 因离开块格子而消失
     private MemoryBlock.MemoryBuild selected;
 
-    @Override
-    public void init(){
-        // 注册设置项（设置 → 内存块读写 → 最大复制长度）
-        ui.settings.addCategory("@memoryaccess.settings", t -> {
-            t.textPref(SETTING_MAXLEN, String.valueOf(DEFAULT_MAXLEN));
-        });
+    /** 把「内存块读写」这一节的设置项挂到 mini辅助 的设置分类里。 */
+    public void addSettings(SettingsTable t){
+        t.pref(new SectionSetting("miniassist-memory"));
 
+        t.textPref(SETTING_MAXLEN, String.valueOf(DEFAULT_MAXLEN));
+    }
+
+    /** 注册事件监听。设置项由 {@link #addSettings(SettingsTable)} 挂到 mini辅助 的设置分类里。 */
+    public void init(){
         // 每帧在选中的内存块上方画两个可点击图标
         Events.run(Trigger.draw, () -> {
             if(!state.isPlaying() || net.active()) return;

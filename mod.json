@@ -1,10 +1,10 @@
 {
-  "name": "memory-access",
-  "displayName": "内存块读写助手",
+  "name": "mini-assist",
+  "displayName": "mini辅助 / Mini Assist",
   "author": "蓝色大肥鱼",
-  "description": "@memoryaccess.description",
+  "description": "钻机产出：按住 F 框选，在选区左上角按矿物逐行显示框内钻机的净输出与实际产出（纯客户端只读，联机可用，服务器无需安装）。\n内存块读写：悬停内存块出现读/写图标，整块复制到剪贴板或从剪贴板写回数字槽（仅单机）。\nDrill output overlay + memory block read/write in one mod.",
   "version": "1.0",
   "minGameVersion": "160",
-  "hidden": true,
-  "main": "memacc.MemoryAccessMod"
+  "main": "miniassist.MiniAssistMod",
+  "hidden": true
 }

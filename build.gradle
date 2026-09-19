@@ -17,17 +17,30 @@ java {
     targetCompatibility = JavaVersion.VERSION_17
 }
 
-// Mindustry mod 源码约定在 src/ 下（而非默认的 src/main/java）
+// Mindustry mod 源码约定在 src/ 下（而非 Gradle 默认的 src/main/java）
 sourceSets.main {
     java.srcDirs = ['src/']
 }
 
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    // 只保留行号（-g:lines）。javac 默认的 -g 还会写入 LocalVariableTable，它只对调试器有用，
+    // 却占掉约 12% 的类体积；行号留着，异常堆栈仍能定位到源码行。
+    options.debugOptions.debugLevel = 'lines'
+}
+
 jar {
     archiveFileName = "${project.name}.jar"
-    // 把 mod.json 打进 jar 根目录（Mindustry 加载 Java mod 必需）
+    // 把 mod.json / bundles 打进 jar 根目录（Mindustry 加载 Java mod 必需）
     from(rootDir){
         include 'mod.json'
         include 'icon.png'
         include 'bundles/**'
     }
 }
+
+/*
+ * API 契约校验由 tools\verify.ps1 执行（不建 Gradle 任务的原因：
+ * core/arc 是 compileOnly 依赖，不会进入 runtimeClasspath，Gradle 里取不到这两个 jar）。
+ * 该脚本用反射逐一确认两个 feature 引用的全部游戏成员真实存在，等价于 JVM 链接期检查。
+ */
