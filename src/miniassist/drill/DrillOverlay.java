@@ -16,6 +16,8 @@ import arc.struct.Seq;
 import arc.util.Align;
 import mindustry.Vars;
 import mindustry.game.EventType.Trigger;
+import mindustry.game.Team;
+import mindustry.gen.Player;
 import mindustry.graphics.Layer;
 import mindustry.graphics.Pal;
 import mindustry.type.Item;
@@ -46,6 +48,13 @@ public class DrillOverlay{
     private static final String SETTING_KEY = "drilloutput-key";
     /** 是否启用。 */
     private static final String SETTING_ENABLED = "drilloutput-enabled";
+    /**
+     * 是否只统计己方（当前玩家队伍）的钻机。
+     *
+     * <p>默认开启：攻击图里的敌队基地、遭遇战地图上的中立钻机（{@code Team.derelict}）
+     * 都不该算进「我方产能」。关掉则框内所有队伍的钻机一起统计。
+     */
+    private static final String SETTING_OWN_TEAM = "drilloutput-own-team";
     /** 是否给文字画深色描边（关闭可消除光晕/发糊）。 */
     private static final String SETTING_OUTLINE = "drilloutput-outline";
     /** 是否绘制选区矩形边框。默认关闭，界面更干净。 */
@@ -278,6 +287,7 @@ public class DrillOverlay{
 
         t.textPref(SETTING_KEY, DEFAULT_KEY.name(), v -> refreshKey());
         t.pref(new PlainCheckSetting(SETTING_ENABLED, true));
+        t.pref(new PlainCheckSetting(SETTING_OWN_TEAM, true));
 
         // 净输出口径：先给一句定义，再给出两个「计入哪些停机钻机」的开关（默认都计入）
         t.pref(new SectionSetting(SETTING_NET_NOTE, true));
@@ -307,6 +317,17 @@ public class DrillOverlay{
 
     private boolean enabled(){
         return Core.settings.getBool(SETTING_ENABLED, true);
+    }
+
+    /** 是否只统计己方钻机（默认开启）。 */
+    private boolean ownTeamOnly(){
+        return Core.settings.getBool(SETTING_OWN_TEAM, true);
+    }
+
+    /** 当前玩家队伍；没有玩家时返回 null（此时不做队伍过滤）。 */
+    private Team ownTeam(){
+        Player p = Vars.player;
+        return p == null ? null : p.team();
     }
 
     /** 是否给文字加深色描边。默认开启（与 v1.0 默认值一致）。 */
@@ -392,6 +413,8 @@ public class DrillOverlay{
         // 选区边长上限同理，并夹到合法区间（设置被手改成越界值也不怕）
         result.maxSide = Mathf.clamp(
             Core.settings.getInt(SETTING_MAX_SIDE, Drills.DEFAULT_MAX_SIDE), MIN_MAX_SIDE, MAX_MAX_SIDE);
+        // 跨队伍过滤：默认只统计己方，敌队 / 中立（废墟）钻机不计入我方产能
+        result.teamFilter = ownTeamOnly() ? ownTeam() : null;
 
         result.scan(x1, y1, x2, y2);
 
@@ -474,10 +497,15 @@ public class DrillOverlay{
         Draw.reset();
     }
 
-    /** 选区尺寸文字（含截断提示）。原来跟在鼠标旁，现已并进选区内部当第一行。 */
+    /** 选区尺寸文字（含截断提示与跨队伍提示）。原来跟在鼠标旁，现已并进选区内部当第一行。 */
     private String areaText(){
-        return Core.bundle.format("drilloutput.area", result.tilesX, result.tilesY,
+        String text = Core.bundle.format("drilloutput.area", result.tilesX, result.tilesY,
             result.clamped ? Core.bundle.format("drilloutput.area-clamped", result.rawTilesX, result.rawTilesY) : "");
+        // 框内有别队钻机时说明它们没被算进来（只在「只统计己方钻机」开启时才有值）
+        if(result.otherTeamCount > 0){
+            text += Core.bundle.format("drilloutput.other-team", result.otherTeamCount);
+        }
+        return text;
     }
 
     /**

@@ -4,15 +4,25 @@ import arc.math.Mathf;
 import arc.struct.IntMap;
 import arc.struct.IntSeq;
 import arc.struct.IntSet;
+import arc.struct.ObjectMap;
 import arc.struct.Seq;
 import arc.util.Strings;
 import arc.util.Time;
 import mindustry.Vars;
 import mindustry.core.World;
+import mindustry.game.Team;
+import mindustry.gen.Building;
 import mindustry.type.Item;
+import mindustry.type.Liquid;
+import mindustry.world.Block;
 import mindustry.world.Tile;
+import mindustry.world.blocks.production.BeamDrill;
+import mindustry.world.blocks.production.BeamDrill.BeamDrillBuild;
+import mindustry.world.blocks.production.BurstDrill;
 import mindustry.world.blocks.production.Drill;
 import mindustry.world.blocks.production.Drill.DrillBuild;
+import mindustry.world.consumers.Consume;
+import mindustry.world.consumers.ConsumeLiquid;
 
 /**
  * 钻机产出统计。
@@ -74,6 +84,8 @@ public class Drills{
     public static class Stat{
         public DrillBuild build;
         public Drill drill;
+        /** 冲击钻（impact-drill / eruption-drill）；不是冲击钻时为 null。 */
+        public BurstDrill burst;
         public Item item;
         public int oreCount;
         public float liquidMul;
@@ -119,6 +131,45 @@ public class Drills{
     public boolean netIncludeNoPower = true;
     /** 净输出是否计入「容量已满」的钻机（默认计入）。 */
     public boolean netIncludeFull = true;
+
+    /**
+     * 只统计这个队伍的钻机；{@code null} = 统计框内所有队伍。
+     *
+     * <p>由设置「只统计己方钻机」+ 当前玩家队伍决定（见 {@code DrillOverlay}）。
+     * 需要过滤的原因是**跨队伍**：攻击图里的敌队基地、遭遇战地图上的中立（{@code Team.derelict}）
+     * 钻机一旦被算进来，读数就不再是「我方产能」，而且停机统计也会被敌队钻机污染。
+     */
+    public Team teamFilter;
+
+    /** 本轮因队伍不符被忽略的钻机台数（同一台多格钻机只算一次），用于面板提示。 */
+    public int otherTeamCount;
+
+    /**
+     * 激光钻（E 星 {@code plasma-bore} / {@code large-plasma-bore}）的一行。
+     *
+     * <p>这类钻机**不是 {@link Drill} 的子类**（{@code BeamDrill extends Block}），
+     * 所以 `instanceof DrillBuild` 抓不到它——早期版本就是这么漏掉 plasma-bore 的。
+     * 它用一束（大等离子钻是三束）激光打前方墙矿，墙上是什么矿就出什么矿，
+     * 一台钻机可以同时打多种矿，所以按矿物分行统计。
+     */
+    public static class BeamStat{
+        public BeamDrillBuild build;
+        public BeamDrill drill;
+        public Item item;
+        /** 这台钻机打在该矿物上的光束数（每束每完成一个周期产 1 件）。 */
+        public int facingCount;
+        /** 个/秒：滑窗口径或瞬时口径，由 averageActual 决定。 */
+        public float actual;
+        /** 额定值（个/秒）：满加成、不含超速。 */
+        public float maxNet;
+        /** 滞回后的停机原因，决定「计入 / 不计入」两个开关。 */
+        public String stall;
+    }
+
+    /** 本次统计里见到的激光钻（每台一次，用于推进滑窗）。 */
+    public final Seq<BeamDrillBuild> beams = new Seq<>();
+    /** 本次统计里激光钻的按矿物分行结果。 */
+    public final Seq<BeamStat> beamStats = new Seq<>();
 
     /**
      * 「实际」列的两种口径（由设置「取平均值」决定）：
@@ -277,6 +328,9 @@ public class Drills{
         activeCount = 0;
         drillCount = stallCount = warmupCount = 0;
         stallFull = stallNoOre = stallNoPower = stallDisabled = 0;
+        otherTeamCount = 0;
+        beams.clear();
+        beamStats.clear();
         clamped = false;
         tilesX = tilesY = rawTilesX = rawTilesY = 0;
 
@@ -319,10 +373,23 @@ public class Drills{
         for(int y = minY; y <= maxY; y++){
             for(int x = minX; x <= maxX; x++){
                 Tile tile = world.tile(x, y);
-                if(tile == null || !(tile.build instanceof DrillBuild b)) continue;
+                if(tile == null) continue;
+                Building build = tile.build;
+                if(build == null) continue;
                 // 多格钻机只统计一次
-                if(!settled.add(b.id)) continue;
-                stats.add(compute(b, stabilize(b)));
+                if(!settled.add(build.id)) continue;
+                // 队伍过滤：不在统计范围内就跳过（多格去重在前，所以这里的台数不会重复计）
+                if(teamFilter != null && build.team != teamFilter){
+                    otherTeamCount++;
+                    continue;
+                }
+
+                if(build instanceof DrillBuild b){
+                    stats.add(compute(b, stabilize(b)));
+                }else if(build instanceof BeamDrillBuild bb){
+                    // 激光钻不是 Drill 系，单独统计（plasma-bore / large-plasma-bore）
+                    collectBeam(bb, stabilize(bb));
+                }
             }
         }
 
@@ -370,10 +437,112 @@ public class Drills{
             }
         }
 
+        // 激光钻的结果并进同一批行（口径与上面一致：台数、停机计数、净输出开关）
+        drillCount += beams.size;
+        for(int i = 0; i < beamStats.size; i++){
+            BeamStat bs = beamStats.get(i);
+            boolean inNet = switch(bs.stall == null ? "" : bs.stall){
+                case "nopower" -> netIncludeNoPower;
+                case "full" -> netIncludeFull;
+                default -> true;
+            };
+
+            totalActual += bs.actual;
+            if(inNet) totalNet += bs.maxNet;
+
+            if(bs.stall != null){
+                stallCount++;
+                switch(bs.stall){
+                    case "full" -> stallFull++;
+                    case "noore" -> stallNoOre++;
+                    case "nopower" -> stallNoPower++;
+                    case "disabled" -> stallDisabled++;
+                    default -> {}
+                }
+            }else{
+                activeCount++;
+            }
+
+            ItemTotal t = itemTotals.get(bs.item);
+            if(t == null){
+                t = new ItemTotal();
+                t.item = bs.item;
+                itemTotals.put(bs.item, t);
+                items.add(t);
+            }
+            t.actual += bs.actual;
+            if(inNet){
+                t.net += bs.maxNet;
+                t.count++;
+            }
+        }
+
         // 按净输出降序（主要参考量），保证行序稳定
         items.sort((a, b) -> Float.compare(b.net, a.net));
 
         return this;
+    }
+
+    /**
+     * 统计一台激光钻（E 星 {@code plasma-bore} / {@code large-plasma-bore}）。
+     *
+     * <p>游戏 {@code BeamDrillBuild.updateTile()} 的口径：
+     * <pre>
+     * multiplier = lerp(1, optionalBoostIntensity, optionalEfficiency)
+     * time += edelta() × multiplier                     // 每帧推进周期
+     * time ≥ drillTime → 每束激光命中格 +1 件，然后 time %= drillTime
+     * lastDrillSpeed = facingAmount × multiplier × timeScale / drillTime × efficiency
+     * </pre>
+     *
+     * <p>所以额定值是 {@code 60 × optionalBoostIntensity × 命中格数 / drillTime}，
+     * 加成是**线性**的——这里没有 Drill 那种「warmup 收敛到 speed」的平方效应。
+     * 一台钻机可以同时打多种墙矿，游戏这时把 {@code lastItem} 置空，所以按命中矿物分开累计。
+     */
+    private void collectBeam(BeamDrillBuild bb, DrillState st){
+        BeamDrill drill = (BeamDrill)bb.block;
+        beams.add(bb);
+
+        ObjectMap<Item, BeamStat> per = new ObjectMap<>();
+        for(Tile t : bb.facing){
+            Item drop = t == null ? null : t.wallDrop();
+            if(drop == null) continue;
+
+            BeamStat bs = per.get(drop);
+            if(bs == null){
+                bs = new BeamStat();
+                bs.build = bb;
+                bs.drill = drill;
+                bs.item = drop;
+                bs.facingCount = 1;
+                per.put(drop, bs);
+                beamStats.add(bs);
+            }else{
+                bs.facingCount++;
+            }
+        }
+
+        // 命中格总数：用来把「整台钻机的速率」按光束数摊到各矿物行上
+        int facing = 0;
+        for(BeamStat bs : per.values()){
+            facing += bs.facingCount;
+        }
+
+        for(BeamStat bs : per.values()){
+            float delay = drill.getDrillTime(bs.item);
+            float boost = st.watered ? drill.optionalBoostIntensity : 1f;
+            bs.maxNet = delay > 0f ? 60f * boost * bs.facingCount / delay : 0f;
+            bs.stall = st.stall;
+
+            if(facing <= 0){
+                bs.actual = 0f;
+            }else if(averageActual){
+                // 滑窗口径：窗口里记的是整台钻机的总件数，按光束占比拆到该矿物
+                bs.actual = windowRate(st) * bs.facingCount / facing;
+            }else{
+                // 瞬时口径：BeamDrill 的 lastDrillSpeed 里**已经含 timeScale**，不能再乘一次
+                bs.actual = stallReason(bb) == null ? 60f * bb.lastDrillSpeed * bs.facingCount / facing : 0f;
+            }
+        }
     }
 
     /**
@@ -385,7 +554,7 @@ public class Drills{
      * <p>接水标志同理但更宽：一旦接水就置真，连续断水 {@link #DRY_LATCH_SCANS} 次（约 5 秒）才降。
      * 首次见到某台钻机时直接采信当前状态，所以刚框选时不会有延迟。
      */
-    private DrillState stabilize(DrillBuild b){
+    private DrillState stabilize(Building b){
         DrillState st = states.get(b.id);
         if(st == null){
             st = new DrillState();
@@ -470,6 +639,9 @@ public class Drills{
             if(st == null) continue;
 
             float delay = s.item == null ? 0f : s.drill.getDrillTime(s.item);
+            // 一个周期出多少件：连续钻机的 progress 里已经乘过 dominantItems，所以只出 1 件；
+            // 冲击钻（BurstDrill）的 progress 不乘 dominantItems，一个周期整批喷 dominantItems 件。
+            float perCycle = s.burst != null ? s.oreCount : 1f;
             float produced;
 
             if(60f * b.lastDrillSpeed * b.timeScale() >= FAST_DRILL_RATE){
@@ -478,24 +650,46 @@ public class Drills{
             }else if(delay > 0f && s.oreCount > 0){
                 float d = b.progress - st.prevProgress;
                 if(d < 0f) d += delay;                       // 产出过 → progress %= delay
-                produced = Mathf.clamp(d, 0f, delay) / delay; // 件数（可为小数，长期积分精确）
+                produced = Mathf.clamp(d, 0f, delay) / delay * perCycle; // 件数（可为小数，长期积分精确）
             }else{
                 produced = 0f;
             }
 
             st.prevProgress = b.progress;
             st.hasProgress = true;
+            pack(st, produced, dt);
+        }
 
-            // 累进当前小片；满 0.05 秒（3 帧）就封片写入环形窗口
-            st.sliceAmount += produced;
-            st.sliceTime += dt;
-            if(st.sliceTime >= SLICE_FRAMES){
-                st.sliceAmounts[st.sliceIndex] = st.sliceAmount;
-                st.sliceDurations[st.sliceIndex] = st.sliceTime;
-                st.sliceIndex = (st.sliceIndex + 1) % WINDOW_SLICES;
-                st.sliceAmount = 0f;
-                st.sliceTime = 0f;
+        // 激光钻（plasma-bore / large-plasma-bore）：周期记在 time 上，一个周期每束激光产 1 件
+        for(int i = 0; i < beams.size; i++){
+            BeamDrillBuild b = beams.get(i);
+            DrillState st = states.get(b.id);
+            if(st == null) continue;
+
+            float delay = ((BeamDrill)b.block).getDrillTime(b.lastItem);
+            float produced = 0f;
+            if(delay > 0f){
+                float d = b.time - st.prevProgress;
+                if(d < 0f) d += delay;                       // 完成一个周期 → time %= drillTime
+                produced = Mathf.clamp(d, 0f, delay) / delay * b.facingAmount;
             }
+
+            st.prevProgress = b.time;
+            st.hasProgress = true;
+            pack(st, produced, dt);
+        }
+    }
+
+    /** 把本帧产出累进当前小片；小片满 {@link #SLICE_FRAMES}（0.05 秒）就封片写入环形窗口。 */
+    private static void pack(DrillState st, float produced, float dt){
+        st.sliceAmount += produced;
+        st.sliceTime += dt;
+        if(st.sliceTime >= SLICE_FRAMES){
+            st.sliceAmounts[st.sliceIndex] = st.sliceAmount;
+            st.sliceDurations[st.sliceIndex] = st.sliceTime;
+            st.sliceIndex = (st.sliceIndex + 1) % WINDOW_SLICES;
+            st.sliceAmount = 0f;
+            st.sliceTime = 0f;
         }
     }
 
@@ -535,6 +729,7 @@ public class Drills{
         Stat s = new Stat();
         s.build = b;
         s.drill = (Drill)b.block;
+        s.burst = b.block instanceof BurstDrill bd ? bd : null;
         s.item = b.dominantItem;
         s.oreCount = b.dominantItems;
 
@@ -583,23 +778,35 @@ public class Drills{
         if(delay <= 0f) return 0f;
 
         float boost = s.drill.liquidBoostIntensity;
-        float mul = watered ? boost * boost : 1f;
+        // 连续钻机：warmup 收敛到 speed ⇒ 稳态倍率 speed²；冲击钻没有 warmup 加成 ⇒ 线性
+        float mul = watered ? (s.burst != null ? boost : boost * boost) : 1f;
         return 60f * mul * s.oreCount / delay;
     }
 
     /**
-     * 是否「接了水」（用于决定额定值里的加水加成）。
+     * 是否「接了加成液」（用于决定额定值里的加成倍率）。
      *
-     * <p><b>不能只看 {@code optionalEfficiency}</b>：它是**本帧实际消耗量**换算出来的，
-     * 而满仓 / 被禁用时 {@code shouldConsume()} 为假、钻机根本不吸水，
-     * 于是它也变成 0 —— 那并不代表没接水。曾经就是因为这个，满仓的钻机会被误判成「断水」，
-     * 额定值从 `boost²` 掉到 1 倍，净输出跟着变（违反「是定值」）。
+     * <p><b>必须认准是哪种液体。</b>早期版本用的是「罐里有没有任何液体」，
+     * 这在瑟尔普洛还凑合（那些钻机唯一的液体就是加成液），但 E 星钻机里
+     * **必需液 ≠ 加成液**：impact-drill 必需水、加成是臭氧；large-plasma-bore 必需氢、加成是氮。
+     * 于是只要接了水，就被当成「加成已开」，额定值白白乘上 1.75（2.33 而不是 1.33）。
+     * 现在从方块消费者的 {@code booster} 标记里取真正的加成液，只看它的储罐。
      *
-     * <p>所以先看**液罐里有没有液体**：它反映「接没接水」这个基础设施状态，
-     * 且不依赖本帧是否在消耗（满仓时罐里照样存着水）。两个信号只要有一个成立就算接了水。
+     * <p><b>为什么还要看 {@code optionalEfficiency}</b>：光看储罐会漏掉「加成液是被即时消耗、
+     * 罐里恰好空了一帧」的情形；反过来只看 {@code optionalEfficiency} 也不行——满仓 / 被禁用时
+     * {@code shouldConsume()} 为假、根本不消耗，它会变成 0，那并不代表没接加成液。两个信号取「或」。
      */
-    private static boolean watered(DrillBuild b){
-        return (b.liquids != null && b.liquids.currentAmount() > 0.0001f) || b.optionalEfficiency > 0.0001f;
+    private static boolean watered(Building b){
+        Liquid boost = boostLiquid(b.block);
+        return (boost != null && b.liquids != null && b.liquids.get(boost) > 0.0001f) || b.optionalEfficiency > 0.0001f;
+    }
+
+    /** 方块定义里被标记为 {@code booster} 的那种液体；没有加成液时返回 null。 */
+    private static Liquid boostLiquid(Block block){
+        for(Consume c : block.consumers){
+            if(c.booster && c instanceof ConsumeLiquid cl) return cl.liquid;
+        }
+        return null;
     }
 
     /**
@@ -618,12 +825,24 @@ public class Drills{
         };
     }
 
-    /** 判定停机原因，未停机返回 null。 */
-    private static String stallReason(DrillBuild b){
+    /** 判定停机原因，未停机返回 null。三种钻机（连续 / 冲击 / 激光）的判据各自不同。 */
+    private static String stallReason(Building b){
         if(!b.enabled) return "disabled";
-        if(b.dominantItem == null || b.dominantItems <= 0) return "noore";
-        if(b.items.total() >= b.block.itemCapacity) return "full";
-        if(b.efficiency <= 0.0001f) return "nopower";
+
+        if(b instanceof BeamDrillBuild bb){
+            // 激光钻：没有矿（没打到墙矿）就不出东西；满仓用 items < itemCapacity 判据
+            if(bb.facingAmount <= 0) return "noore";
+            if(bb.items.total() >= bb.block.itemCapacity) return "full";
+            if(bb.efficiency <= 0.0001f) return "nopower";
+            return null;
+        }
+
+        DrillBuild db = (DrillBuild)b;
+        if(db.dominantItem == null || db.dominantItems <= 0) return "noore";
+        // 冲击钻要留得下一整批才开工（shouldConsume 同样按 itemCapacity - dominantItems 判）
+        int room = db instanceof BurstDrill.BurstDrillBuild ? db.block.itemCapacity - db.dominantItems : db.block.itemCapacity;
+        if(db.items.total() >= room) return "full";
+        if(db.efficiency <= 0.0001f) return "nopower";
         return null;
     }
 
@@ -660,6 +879,6 @@ public class Drills{
     }
 
     public boolean isEmpty(){
-        return stats.isEmpty();
+        return stats.isEmpty() && beamStats.isEmpty();
     }
 }

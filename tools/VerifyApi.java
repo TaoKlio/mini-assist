@@ -45,6 +45,39 @@ public class VerifyApi{
         field(drillBuild, "x", float.class);
         field(drillBuild, "y", float.class);
 
+        // --- 跨队伍过滤（Drills.teamFilter / DrillOverlay.ownTeam）---
+        // 建筑与玩家都实现 Teamc：team 字段 + team() 取值方法
+        Class<?> teamOwner  = cls("mindustry.gen.Building");
+        Class<?> teamCls    = cls("mindustry.game.Team");
+        Class<?> playerCls  = cls("mindustry.gen.Player");
+        field(teamOwner, "team", teamCls);
+        method(teamOwner, "team", teamCls);
+        field(cls("mindustry.Vars"), "player", playerCls);
+        method(playerCls, "team", teamCls);
+
+        // --- E 星钻机：激光钻（BeamDrill）与冲击钻（BurstDrill）---
+        // BeamDrill 不是 Drill 的子类（extends Block），必须单独认它的 Build 类型；
+        // 冲击钻虽然 extends Drill，但产出节奏不同（一个周期喷 dominantItems 件）。
+        Class<?> beamDrill  = cls("mindustry.world.blocks.production.BeamDrill");
+        Class<?> beamBuild  = cls("mindustry.world.blocks.production.BeamDrill$BeamDrillBuild");
+        Class<?> burstDrill = cls("mindustry.world.blocks.production.BurstDrill");
+        field(burstDrill, "invertedTime", float.class);
+        cls("mindustry.world.blocks.production.BurstDrill$BurstDrillBuild");
+        field(beamBuild, "facing", cls("[Lmindustry.world.Tile;"));
+        field(beamBuild, "facingAmount", int.class);
+        field(beamBuild, "lastItem", cls("mindustry.type.Item"));
+        field(beamBuild, "time", float.class);
+        field(beamBuild, "lastDrillSpeed", float.class);
+        field(beamBuild, "warmup", float.class);
+        field(beamDrill, "optionalBoostIntensity", float.class);
+        method(beamDrill, "getDrillTime", float.class, cls("mindustry.type.Item"));
+        method(tile, "wallDrop", cls("mindustry.type.Item"));
+        // 加成液判定：从消费者的 booster 标记里找真正的那一种液体，再看它的储罐
+        field(cls("mindustry.world.consumers.Consume"), "booster", boolean.class);
+        field(cls("mindustry.world.consumers.ConsumeLiquid"), "liquid", cls("mindustry.type.Liquid"));
+        field(cls("mindustry.world.Block"), "consumers", cls("[Lmindustry.world.consumers.Consume;"));
+        method(cls("mindustry.world.modules.LiquidModule"), "get", float.class, cls("mindustry.type.Liquid"));
+
         field(drill, "liquidBoostIntensity", float.class);
         field(item, "localizedName", String.class);
         // 行序排序的兜底键：净输出相同时按矿物 id 排，保证顺序确定
